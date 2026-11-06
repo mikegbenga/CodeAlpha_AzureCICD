@@ -1,0 +1,186 @@
+# =====================================================================
+# CodeAlpha DevOps Task 1 — CI/CD pipeline using Azure
+#   Test  ->  Build & push image to Azure Container Registry
+#         ->  Deploy to Azure App Service (Web App for Containers)
+#         ->  Smoke test + automatic rollback on failure
+# =====================================================================
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    exclude: ['docs/**', '*.md']
+
+pr:
+  branches:
+    include: [main]
+
+parameters:
+- name: simulateFailure
+  displayName: 'Simulate a failed release (demo the automatic rollback)'
+  type: boolean
+  default: false
+
+variables:
+  # ---- Change these to match your Azure resources (see docs/SETUP.md) ----
+  dockerRegistryServiceConnection: 'sc-acr-codealpha'      # Docker Registry service connection -> ACR
+  azureSubscription: 'sc-azure-codealpha'                  # Azure Resource Manager service connection
+  acrLoginServer: 'acrcodealphamga.azurecr.io'
+  imageRepository: 'codealpha-webapp'
+  webAppName: 'app-codealpha-mga'
+  resourceGroup: 'rg-codealpha-cicd'
+  # -------------------------------------------------------------------------
+  imageTag: '$(Build.BuildId)'
+  vmImageName: 'ubuntu-latest'
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+stages:
+# ---------------------------------------------------------------------
+- stage: CI
+  displayName: 'Continuous Integration'
+  jobs:
+  - job: Test
+    displayName: 'Unit tests'
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: UseNode@1
+      displayName: 'Use Node.js 22'
+      inputs:
+        version: '22.x'
+
+    - script: npm run test:ci
+      displayName: 'Run tests (JUnit output)'
+      workingDirectory: app
+
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'app/test-results.xml'
+        testRunTitle: 'Unit tests - $(Build.BuildId)'
+        failTaskOnFailedTests: true
+
+# ---------------------------------------------------------------------
+- stage: Build
+  displayName: 'Build & Push to ACR'
+  dependsOn: CI
+  jobs:
+  - job: Docker
+    displayName: 'Docker build'
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Docker@2
+      displayName: 'Login to ACR'
+      condition: eq(variables.isMain, true)
+      inputs:
+        command: login
+        containerRegistry: $(dockerRegistryServiceConnection)
+
+    - task: Docker@2
+      displayName: 'Build image'
+      inputs:
+        command: build
+        repository: $(imageRepository)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        Dockerfile: 'Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)'
+        tags: |
+          $(imageTag)
+          latest
+        arguments: >-
+          --build-arg APP_VERSION=1.0.$(Build.BuildId)
+          --build-arg BUILD_ID=$(Build.BuildId)
+          --build-arg GIT_SHA=$(Build.SourceVersion)
+
+    - script: |
+        set -euo pipefail
+        IMAGE="$(acrLoginServer)/$(imageRepository):$(imageTag)"
+        docker run -d --name smoke -p 3000:3000 "$IMAGE"
+        for i in $(seq 1 15); do
+          if curl -fsS http://127.0.0.1:3000/health; then echo; echo "Container healthy"; exit 0; fi
+          sleep 2
+        done
+        docker logs smoke; exit 1
+      displayName: 'Container smoke test (local run)'
+
+    - task: Docker@2
+      displayName: 'Push image to ACR'
+      condition: and(succeeded(), eq(variables.isMain, true))
+      inputs:
+        command: push
+        repository: $(imageRepository)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(imageTag)
+          latest
+
+# ---------------------------------------------------------------------
+- stage: Deploy
+  displayName: 'Deploy to App Service'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isMain, true))
+  jobs:
+  - deployment: DeployWebApp
+    displayName: 'Deploy container to Azure Web App'
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'codealpha-production'     # add approvals/checks on this environment in Azure DevOps
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Record currently deployed image (for rollback)'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                PREV=$(az webapp config show -g $(resourceGroup) -n $(webAppName) \
+                       --query linuxFxVersion -o tsv | sed 's#^DOCKER|##')
+                echo "Previous image: ${PREV:-none}"
+                echo "##vso[task.setvariable variable=previousImage]$PREV"
+
+          - task: AzureWebAppContainer@1
+            displayName: 'Deploy $(imageRepository):$(imageTag)'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appName: $(webAppName)
+              resourceGroupName: $(resourceGroup)
+              containers: '$(acrLoginServer)/$(imageRepository):$(imageTag)'
+              appSettings: '-APP_VERSION 1.0.$(Build.BuildId) -BUILD_ID $(Build.BuildId) -APP_ENVIRONMENT production -WEBSITES_PORT 3000'
+
+          - script: |
+              set -euo pipefail
+              if [ "${{ parameters.simulateFailure }}" = "True" ]; then
+                echo "##vso[task.logissue type=warning]simulateFailure=true -> forcing smoke test failure"; exit 1
+              fi
+              URL="https://$(webAppName).azurewebsites.net/health"
+              echo "Waiting for $URL to report build $(Build.BuildId)…"
+              for i in $(seq 1 30); do
+                BODY=$(curl -fsS "$URL" || true)
+                echo "[$i] $BODY"
+                if echo "$BODY" | grep -q '"version":"1.0.$(Build.BuildId)"'; then
+                  echo "Deployment verified"; exit 0
+                fi
+                sleep 10
+              done
+              echo "##vso[task.logissue type=error]Smoke test failed for build $(Build.BuildId)"
+              exit 1
+            displayName: 'Post-deploy smoke test'
+
+          - task: AzureCLI@2
+            displayName: 'Roll back to previous image (only if a step failed)'
+            condition: and(failed(), ne(variables.previousImage, ''))
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                echo "Rolling back to $(previousImage)"
+                az webapp config container set -g $(resourceGroup) -n $(webAppName) \
+                  --container-image-name "$(previousImage)"
+                az webapp restart -g $(resourceGroup) -n $(webAppName)

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeAlpha · Azure CI/CD</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">CodeAlpha DevOps Internship · Task 1</p>
+    <h1>Shipped by Azure Pipelines</h1>
+    <p class="lede">This page was built into a container image, pushed to Azure Container Registry and
+      deployed to Azure App Service automatically on every commit to <code>main</code>.</p>
+
+    <ol class="flow">
+      <li><span>1</span>Commit to GitHub</li>
+      <li><span>2</span>Test (Node test runner)</li>
+      <li><span>3</span>Build &amp; push image to ACR</li>
+      <li><span>4</span>Deploy to App Service</li>
+      <li><span>5</span>Smoke-test /health</li>
+    </ol>
+
+    <section class="card" aria-live="polite">
+      <h2>Running build</h2>
+      <dl id="info"><dt>Status</dt><dd>loading…</dd></dl>
+    </section>
+
+    <footer>Michael Gbenga Abajemito · <a href="/health">/health</a> · <a href="/api/info">/api/info</a></footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

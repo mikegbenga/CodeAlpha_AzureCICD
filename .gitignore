@@ -1,0 +1,11 @@
+node_modules/
+test-results.xml
+.env
+*.log
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+.terraform.lock.hcl
+crash.log

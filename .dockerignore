@@ -1,0 +1,10 @@
+.git
+.github
+**/node_modules
+**/test-results.xml
+infra
+docs
+scripts
+*.md
+azure-pipelines.yml
+.env*
